@@ -1,0 +1,225 @@
+// Social Show Tracker — Prisma schema
+// Source of truth for the data model described in plan.md / endpoints.md.
+// Field/enum casing intentionally mirrors the API contract in endpoints.md
+// (status values upper-case, mediaType/platform values lower-case) so the
+// DTOs need no translation layer between DB and API.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum MediaType {
+  movie
+  tv
+}
+
+enum WatchStatus {
+  WATCHED
+  WATCHING
+  WANT_TO_WATCH
+}
+
+enum Platform {
+  ios
+  android
+}
+
+// ---------------------------------------------------------------------------
+// User & auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String  @id @default(uuid())
+  username     String  @unique
+  email        String  @unique
+  passwordHash String
+  displayName  String
+  avatarUrl    String?
+  bio          String  @default("")
+  timezone     String // IANA string, e.g. "Africa/Cairo"
+  isPrivate    Boolean @default(false)
+
+  // Denormalized streak counters (plan.md §Streak) — updated on write, not
+  // derived live. watchedAt on WatchLogEntry remains the durable source of
+  // truth for reconciliation if this ever drifts.
+  currentStreakCount Int       @default(0)
+  longestStreakCount Int       @default(0)
+  lastStreakDate     DateTime? @db.Date
+
+  // Set on account deletion instead of hard-deleting the row, so existing
+  // WatchLogEntry rows stay valid for other users' feeds/history (plan.md
+  // polish milestone: "cascade/anonymize — worth designing into the schema
+  // now"). PII (email/username/passwordHash) is scrubbed at deletion time;
+  // application layer, not the schema, enforces that.
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  watchLogEntries       WatchLogEntry[]
+  refreshTokens         RefreshToken[]
+  deviceTokens          DeviceToken[]
+  notificationPreference NotificationPreference?
+
+  following Follow[] @relation("Follower")
+  followers Follow[] @relation("Followee")
+
+  blocking Block[] @relation("Blocker")
+  blockedBy Block[] @relation("Blocked")
+
+  @@index([deletedAt])
+}
+
+// Opaque refresh tokens (rotated on use, per endpoints.md `/auth/refresh`).
+// Only a hash is stored so a leaked DB dump doesn't yield usable tokens.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Follow graph
+// ---------------------------------------------------------------------------
+
+// One-way follow model (confirmed in plan.md — Letterboxd/Twitter style, no
+// pending/accepted state). Composite PK is indexed for "who does X follow"
+// lookups; the extra index on followeeId covers "who follows X" (followers
+// list) in the other direction.
+model Follow {
+  followerId String
+  followeeId String
+  createdAt  DateTime @default(now())
+
+  follower User @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  followee User @relation("Followee", fields: [followeeId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followeeId])
+  @@index([followeeId])
+}
+
+// Blocking removes any existing Follow edges in both directions at the
+// application layer and prevents new ones (endpoints.md §Moderation).
+model Block {
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@id([blockerId, blockedId])
+  @@index([blockedId])
+}
+
+// ---------------------------------------------------------------------------
+// TMDB cache (Show / Episode)
+// ---------------------------------------------------------------------------
+
+// Local cache-aside copy of TMDB show/movie data (plan.md §Core Data Model).
+// Required, not optional: WatchLogEntry needs a local FK target, feed/list
+// queries need to SQL-join against it, and it insulates the app from TMDB
+// downtime/rate limits.
+model Show {
+  id            String    @id @default(uuid())
+  tmdbId        Int       @unique
+  mediaType     MediaType
+  title         String
+  overview      String
+  posterPath    String?
+  backdropPath  String?
+  releaseDate   DateTime? @db.Date
+  tmdbRating    Float?
+  genres        Json // string[] cached as jsonb, per plan.md
+  status        String? // TMDB's own lifecycle status, e.g. "Ended", "Returning Series"
+  lastSyncedAt  DateTime // drives cache-aside TTL refresh
+
+  episodes       Episode[]
+  watchLogEntries WatchLogEntry[]
+}
+
+model Episode {
+  id            String   @id @default(uuid())
+  showId        String
+  show          Show     @relation(fields: [showId], references: [id], onDelete: Cascade)
+  seasonNumber  Int
+  episodeNumber Int
+  name          String
+  airDate       DateTime? @db.Date
+  overview      String
+  stillPath     String?
+  lastSyncedAt  DateTime
+
+  watchLogEntries WatchLogEntry[]
+
+  @@unique([showId, seasonNumber, episodeNumber])
+}
+
+// ---------------------------------------------------------------------------
+// Watch log & streak-driving writes
+// ---------------------------------------------------------------------------
+
+// No uniqueness constraint on (userId, showId) — rewatches are separate rows
+// (plan.md). watchedAt is a local calendar date (not a timestamp): it's what
+// streak day-comparison and diary ordering key off of.
+model WatchLogEntry {
+  id        String      @id @default(uuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  showId    String
+  show      Show        @relation(fields: [showId], references: [id], onDelete: Restrict)
+  episodeId String?
+  episode   Episode?    @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  status    WatchStatus
+  // Half-star grid, 0.5–5.0 (confirmed in plan.md). Decimal, not Float, to
+  // avoid binary floating-point rounding on a value users see rendered back
+  // exactly (e.g. 4.5 must never come back as 4.4999999). Grid validation
+  // (multiples of 0.5) is enforced at the API layer, not the DB.
+  rating    Decimal?    @db.Decimal(2, 1)
+  watchedAt DateTime    @db.Date
+  note      String      @default("")
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@index([userId, status])
+  @@index([userId, watchedAt(sort: Desc)])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (polish milestone)
+// ---------------------------------------------------------------------------
+
+model DeviceToken {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expoPushToken  String   @unique
+  platform       Platform
+  createdAt      DateTime @default(now())
+
+  @@index([userId])
+}
+
+model NotificationPreference {
+  userId            String  @id
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  streakReminders   Boolean @default(true)
+  newFollowerAlerts Boolean @default(true)
+  activityAlerts    Boolean @default(false)
+  updatedAt         DateTime @updatedAt
+}
