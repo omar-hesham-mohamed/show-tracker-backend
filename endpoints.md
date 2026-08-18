@@ -27,6 +27,7 @@ Liveness/readiness check for deploy platform + local Docker compose verification
 ```json
 { "status": "ok", "db": "ok", "uptimeSeconds": 1234 }
 ```
+**Response `503`** (DB ping failed) — same shape, `db: "error"`.
 
 ---
 
@@ -169,9 +170,9 @@ Never call TMDB directly from mobile — everything routes through here, cache-a
 }
 ```
 
-### `GET /shows/:tmdbId` — Auth required
+### `GET /shows/:mediaType/:tmdbId` — Auth required
 Show/movie detail. Fetched fresh from TMDB on cache miss or TTL expiry, upserted into local `Show` table, then served from cache.
-**Path param**: `tmdbId` (TMDB's numeric ID, not internal `id`).
+**Path params**: `mediaType` (`movie` | `tv`), `tmdbId` (TMDB's numeric ID, not internal `id`). `mediaType` is required because TMDB movie IDs and TV IDs are independent sequences — the same numeric ID can refer to an unrelated movie and TV show, so `tmdbId` alone is ambiguous (`Show` is uniqued on `(tmdbId, mediaType)`, not `tmdbId` alone).
 **Response `200`**
 ```json
 {
@@ -181,19 +182,32 @@ Show/movie detail. Fetched fresh from TMDB on cache miss or TTL expiry, upserted
   "status": "Ended", "seasonCount": 8
 }
 ```
-**Errors**: `404` unknown TMDB ID.
+**Errors**: `404` unknown TMDB ID for that `mediaType`.
 
-### `GET /shows/:tmdbId/watch-providers` — Auth required
-**Query**: `region` (ISO 3166-1 alpha-2, default from caller's locale or `US` fallback).
-Short-TTL cache (availability changes far more often than metadata, per plan.md).
+### `GET /shows/:mediaType/:tmdbId/watch-providers` — Auth required
+**Query**: `region` (ISO 3166-1 alpha-2) — **accepted but currently a no-op**: region-keyed caching is deferred post-MVP (plan.md), so every call is served/cached for `US` only regardless of what's passed.
+Same 7-day TTL as show metadata today, tracked independently (`Show.watchProvidersSyncedAt`) so it can be shortened later without touching the metadata cache.
 **Response `200`**
 ```json
 { "region": "US", "link": "https://www.themoviedb.org/...", "flatrate": [ { "providerName": "Netflix", "logoPath": "/..." } ], "rent": [], "buy": [] }
 ```
 Response must be rendered with required TMDB/JustWatch attribution in the mobile UI (plan.md gotcha — not an API concern but noted here since the client depends on this payload).
 
-### `GET /shows/:tmdbId/seasons/:seasonNumber` — Auth required
-TV-only. Season detail with its episode list; upserts `Episode` rows.
+### `GET /shows/:mediaType/:tmdbId/recommendations` — Auth required
+Live TMDB proxy for the show-detail "more like this" carousel — **never cached** (same rationale as `GET /shows/search`: a list of stubs has near-zero cache-hit value). No pagination — always TMDB's first page (~20 items); a shelf, not an infinite list.
+**Response `200`**
+```json
+{
+  "results": [
+    { "tmdbId": 94997, "mediaType": "tv", "title": "House of the Dragon", "posterPath": "/...", "releaseDate": "2022-08-21", "tmdbRating": 8.4 }
+  ]
+}
+```
+An empty `results` array is expected for obscure/new titles with a thin recommendation signal — the client should hide the carousel rather than the API falling back to a second TMDB call. Recommended shows are **not** upserted into the local `Show` table just for appearing in this list — a show only gets cached once the user actually opens it via `GET /shows/:mediaType/:tmdbId`.
+**Errors**: `404` unknown TMDB ID for that `mediaType`.
+
+### `GET /shows/tv/:tmdbId/seasons/:seasonNumber` — Auth required
+TV-only (fixed `tv` path segment, not a `:mediaType` param — a movie has no seasons, so this route simply doesn't exist for one). Season detail with its episode list; upserts `Episode` rows. Requires the parent `Show` to already be cached (no implicit show-fetch side effect).
 **Response `200`**
 ```json
 {
@@ -203,7 +217,7 @@ TV-only. Season detail with its episode list; upserts `Episode` rows.
   ]
 }
 ```
-**Errors**: `404` show not found, `400` called on a `mediaType: movie` show, `404` season doesn't exist.
+**Errors**: `404` show not found, `404` season doesn't exist.
 
 ---
 

@@ -31,4 +31,17 @@ export default tseslint.config(
       '@typescript-eslint/no-unsafe-argument': 'warn'
     },
   },
+  {
+    // Test doubles (mocked PrismaService/HttpService/ExecutionContext, etc.)
+    // are necessarily loosely typed — that's the point of a mock, not a bug.
+    // The strict unsafe-* rules stay on for real src code, where an `any`
+    // leak usually is a real mistake.
+    files: ['**/*spec.ts'], // matches both *.spec.ts and test/*.e2e-spec.ts
+    rules: {
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+    },
+  },
 );

@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
-import * as request from 'supertest';
+import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 
@@ -23,7 +23,9 @@ describe('HealthController (e2e)', () => {
       .expect(200)
       .expect((res) => {
         if (res.body.status !== 'ok' || res.body.db !== 'ok') {
-          throw new Error(`unexpected health response: ${JSON.stringify(res.body)}`);
+          throw new Error(
+            `unexpected health response: ${JSON.stringify(res.body)}`,
+          );
         }
       });
   });

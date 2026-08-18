@@ -5,6 +5,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { STATUS_CODES } from 'http';
 import type { Request, Response } from 'express';
 
 /**
@@ -33,7 +34,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     response.status(statusCode).json({
       ...base,
       statusCode,
-      error: base.error ?? 'Internal Server Error',
+      error: base.error ?? STATUS_CODES[statusCode] ?? 'Internal Server Error',
       message: base.message ?? 'Internal server error',
       path: request.originalUrl,
     });

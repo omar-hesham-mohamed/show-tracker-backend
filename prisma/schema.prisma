@@ -135,9 +135,12 @@ model Block {
 // Required, not optional: WatchLogEntry needs a local FK target, feed/list
 // queries need to SQL-join against it, and it insulates the app from TMDB
 // downtime/rate limits.
+// tmdbId is NOT globally unique on its own — TMDB movie IDs and TV IDs are
+// independent sequences, so a movie and an unrelated TV show can share the
+// same numeric ID. Uniqueness (and cache lookups) must be scoped by mediaType.
 model Show {
   id            String    @id @default(uuid())
-  tmdbId        Int       @unique
+  tmdbId        Int
   mediaType     MediaType
   title         String
   overview      String
@@ -147,10 +150,19 @@ model Show {
   tmdbRating    Float?
   genres        Json // string[] cached as jsonb, per plan.md
   status        String? // TMDB's own lifecycle status, e.g. "Ended", "Returning Series"
+  seasonCount   Int? // TV only; season stubs aren't persisted individually (lazy per-season fetch)
   lastSyncedAt  DateTime // drives cache-aside TTL refresh
+
+  // Single-region (US) watch-provider cache; region-keyed caching deferred
+  // post-MVP (plan.md). Nullable — not fetched until the watch-providers
+  // endpoint is actually hit for this show.
+  watchProviders         Json?
+  watchProvidersSyncedAt DateTime?
 
   episodes       Episode[]
   watchLogEntries WatchLogEntry[]
+
+  @@unique([tmdbId, mediaType])
 }
 
 model Episode {

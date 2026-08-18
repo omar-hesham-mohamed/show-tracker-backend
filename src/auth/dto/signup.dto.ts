@@ -5,7 +5,10 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
-import { IsIanaTimezone } from './is-iana-timezone.validator';
+import {
+  IsIanaTimezone,
+  NormalizeIanaTimezone,
+} from './is-iana-timezone.validator';
 
 export class SignupDto {
   @IsEmail()
@@ -28,6 +31,7 @@ export class SignupDto {
   @MaxLength(50)
   displayName!: string;
 
+  @NormalizeIanaTimezone()
   @IsIanaTimezone()
   timezone!: string;
 }

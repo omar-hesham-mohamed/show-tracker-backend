@@ -49,7 +49,12 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     }
 
     if (err || !user) {
-      throw err instanceof Error ? err : new UnauthorizedException();
+      // Never rethrow the raw error (e.g. a JsonWebTokenError from an
+      // invalid/malformed token) — it isn't an HttpException, so it would
+      // fall through to the global filter's 500 branch instead of a clean 401.
+      throw new UnauthorizedException(
+        err instanceof Error ? err.message : undefined,
+      );
     }
 
     return user;
