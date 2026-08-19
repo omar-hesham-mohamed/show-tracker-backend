@@ -6,7 +6,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { randomBytes, createHash } from 'crypto';
-import { User } from '@prisma/client';
+import { Prisma, User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SignupDto } from './dto/signup.dto';
 import { LoginDto } from './dto/login.dto';
@@ -53,15 +53,38 @@ export class AuthService {
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_SALT_ROUNDS);
 
-    const user = await this.prisma.user.create({
-      data: {
-        email,
-        username,
-        passwordHash,
-        displayName: dto.displayName,
-        timezone: dto.timezone,
-      },
-    });
+    let user: User;
+    try {
+      user = await this.prisma.user.create({
+        data: {
+          email,
+          username,
+          passwordHash,
+          displayName: dto.displayName,
+          timezone: dto.timezone,
+        },
+      });
+    } catch (error) {
+      // The findFirst check above is a check-then-act race, not a guarantee
+      // — two concurrent signups for the same email/username can both pass
+      // it and only collide here, at the DB's own unique constraint (bug
+      // found via testing — see plan.md). Without this catch, Prisma's raw
+      // P2002 error isn't an HttpException and falls through to the global
+      // filter's generic 500 instead of the 409 this already returns for
+      // the non-concurrent case above.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const target = (error.meta?.target as string[] | undefined) ?? [];
+        throw new ConflictException(
+          target.includes('email')
+            ? 'Email already in use'
+            : 'Username already taken',
+        );
+      }
+      throw error;
+    }
 
     const tokens = await this.issueTokens(user.id);
     return { ...tokens, user: this.toPublicUser(user) };

@@ -2,6 +2,7 @@ import {
   ArgumentsHost,
   BadRequestException,
   HttpException,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -26,9 +27,20 @@ function makeHost(path = '/api/v1/shows/123') {
 
 describe('HttpExceptionFilter', () => {
   let filter: HttpExceptionFilter;
+  let errorSpy: jest.SpyInstance;
 
   beforeEach(() => {
     filter = new HttpExceptionFilter();
+    // The filter now logs every unhandled exception (see the "logging"
+    // describe block below) — silenced by default here so the many other
+    // tests deliberately triggering 500s don't spam real log output.
+    errorSpy = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   it('normalizes a built-in NotFoundException into the documented { statusCode, error, message, path } shape', () => {
@@ -116,5 +128,34 @@ describe('HttpExceptionFilter', () => {
     filter.catch(new NotFoundException(), host);
 
     expect(json.mock.calls[0][0].path).toBe('/api/v1/auth/login');
+  });
+
+  describe('logging (bug found via testing — see plan.md)', () => {
+    // Previously an unhandled (non-HttpException) exception produced zero
+    // server-side log output — the client got a generic 500, but nothing
+    // was written anywhere, making the failure invisible to on-call.
+    it('logs the underlying error for an unhandled (non-HttpException) exception', () => {
+      const { host } = makeHost();
+      filter.catch(new Error('connection terminated unexpectedly'), host);
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0][0]).toContain(
+        'connection terminated unexpectedly',
+      );
+    });
+
+    it('logs a thrown non-Error value too, without crashing', () => {
+      const { host } = makeHost();
+      filter.catch('a plain string was thrown', host);
+
+      expect(errorSpy).toHaveBeenCalledWith('a plain string was thrown');
+    });
+
+    it('does not log anything for a normal, expected HttpException', () => {
+      const { host } = makeHost();
+      filter.catch(new NotFoundException('Show not found'), host);
+
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
   });
 });

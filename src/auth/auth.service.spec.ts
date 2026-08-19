@@ -1,7 +1,15 @@
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
+import { Prisma } from '@prisma/client';
 import { AuthService } from './auth.service';
 import { BCRYPT_SALT_ROUNDS } from './auth.constants';
+
+function uniqueConstraintError(target: string[]) {
+  return new Prisma.PrismaClientKnownRequestError(
+    `Unique constraint failed on the fields: (\`${target.join(',')}\`)`,
+    { code: 'P2002', clientVersion: '6.19.3', meta: { target } },
+  );
+}
 
 jest.mock('bcrypt');
 
@@ -195,6 +203,43 @@ describe('AuthService', () => {
       expect(persisted.userId).toBe(baseUser.id);
       expect(persisted.tokenHash).not.toBe(result.refreshToken);
       expect(persisted.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    describe('concurrent duplicate signup (bug found via testing — see plan.md)', () => {
+      // findFirst is a check-then-act race, not a guarantee: two concurrent
+      // signups for the same email/username can both pass it and only
+      // collide at the DB's own unique constraint inside create().
+      it('translates a P2002 on email into the same 409 as the non-concurrent case', async () => {
+        prisma.user.findFirst.mockResolvedValue(null);
+        (bcrypt.hash as jest.Mock).mockResolvedValue('hashed-pw');
+        prisma.user.create.mockRejectedValue(uniqueConstraintError(['email']));
+
+        await expect(service.signup(dto)).rejects.toThrow(ConflictException);
+        await expect(service.signup(dto)).rejects.toThrow(
+          'Email already in use',
+        );
+      });
+
+      it('translates a P2002 on username into the same 409 as the non-concurrent case', async () => {
+        prisma.user.findFirst.mockResolvedValue(null);
+        (bcrypt.hash as jest.Mock).mockResolvedValue('hashed-pw');
+        prisma.user.create.mockRejectedValue(
+          uniqueConstraintError(['username']),
+        );
+
+        await expect(service.signup(dto)).rejects.toThrow(
+          'Username already taken',
+        );
+      });
+
+      it('rethrows a non-P2002 create() failure unchanged rather than mislabeling it as a conflict', async () => {
+        prisma.user.findFirst.mockResolvedValue(null);
+        (bcrypt.hash as jest.Mock).mockResolvedValue('hashed-pw');
+        const dbOutage = new Error('connection terminated unexpectedly');
+        prisma.user.create.mockRejectedValue(dbOutage);
+
+        await expect(service.signup(dto)).rejects.toBe(dbOutage);
+      });
     });
   });
 

@@ -88,9 +88,16 @@ describe('JwtAuthGuard', () => {
       ).toThrow(UnauthorizedException);
     });
 
-    it('wraps a raw passport/JWT error (e.g. JsonWebTokenError) into a clean UnauthorizedException instead of leaking it through', () => {
+    it('[FIXED — bug found via testing, see plan.md] rethrows a raw non-HttpException error unchanged, instead of wrapping it into a leaky UnauthorizedException', () => {
+      // err here only ever originates from JwtStrategy.validate() itself
+      // throwing (e.g. an unexpected DB error) — a malformed/expired JWT is
+      // reported via `info`, not `err` (see the guard's own comment). The
+      // old behavior re-wrapped ANY truthy err as `UnauthorizedException
+      // (err.message)`, mislabeling an infra failure as a 401 and leaking
+      // its internal message to the client. Rethrowing unchanged lets it
+      // fall through to the global filter's generic, non-leaking 500.
       jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(false);
-      const rawError = new Error('jwt malformed');
+      const rawError = new Error('connection terminated unexpectedly');
 
       let caught: unknown;
       try {
@@ -99,12 +106,11 @@ describe('JwtAuthGuard', () => {
         caught = e;
       }
 
-      expect(caught).toBeInstanceOf(UnauthorizedException);
-      expect(caught).not.toBe(rawError); // must not be the raw error itself
-      expect((caught as UnauthorizedException).message).toBe('jwt malformed');
+      expect(caught).toBe(rawError); // rethrown unchanged, not wrapped
+      expect(caught).not.toBeInstanceOf(UnauthorizedException);
     });
 
-    it('throws UnauthorizedException with an undefined message when the rejection reason is not an Error instance', () => {
+    it('[FIXED — bug found via testing, see plan.md] wraps a non-Error rejection reason in an Error rather than fabricating an UnauthorizedException', () => {
       jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(false);
 
       let caught: unknown;
@@ -119,7 +125,24 @@ describe('JwtAuthGuard', () => {
         caught = e;
       }
 
-      expect(caught).toBeInstanceOf(UnauthorizedException);
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(UnauthorizedException);
+      expect((caught as Error).message).toBe('some non-Error rejection');
+    });
+
+    it("rethrows JwtStrategy.validate()'s own deliberate UnauthorizedException (unknown/deleted user) unchanged, staying a clean 401 with no leaked detail", () => {
+      jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(false);
+      const deliberateAuthFailure = new UnauthorizedException();
+
+      let caught: unknown;
+      try {
+        guard.handleRequest(deliberateAuthFailure, false, null, makeContext());
+      } catch (e) {
+        caught = e;
+      }
+
+      expect(caught).toBe(deliberateAuthFailure);
+      expect((caught as UnauthorizedException).getStatus()).toBe(401);
       expect((caught as UnauthorizedException).message).toBe('Unauthorized');
     });
 

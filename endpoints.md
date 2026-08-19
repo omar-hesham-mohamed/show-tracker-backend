@@ -225,6 +225,8 @@ TV-only (fixed `tv` path segment, not a `:mediaType` param — a movie has no se
 
 ### `POST /watch-log` — Auth required
 Create a log entry. Triggers streak recompute when `status: WATCHED` (plan.md §Streak). No uniqueness constraint on `(userId, showId)` — rewatches allowed.
+
+**Not yet implemented (Phase 4 as-built)**: `streakAfterWrite` is omitted from the response below — write-time streak recompute is Phase 5's scope (plan.md Decisions Log). Phase 4's `watchedAt` handling only does a loose, honor-system future-date sanity check (independent of the actual streak-day decision), and the show is resolved via the existing `TmdbService.getShowDetail` cache-aside path rather than any new TMDB-fetch code.
 **Request**
 ```json
 {
@@ -265,6 +267,7 @@ Update rating/note/status/watchedAt. Changing `status` to/from `WATCHED` or chan
 **Request**: any subset of `{ status, rating, watchedAt, note }`.
 **Response `200`**: updated entry, same shape as create response (including `streakAfterWrite` if the write affected streak-relevant fields).
 **Errors**: `404` not found/not owned.
+**Not yet implemented (Phase 4 as-built)**: same `streakAfterWrite` deferral as `POST /watch-log` above.
 
 ### `DELETE /watch-log/:id` — Auth required (owner only)
 Deleting a `WATCHED` entry that was the sole entry for its day triggers a streak reconciliation (recompute from remaining `watchedAt` rows — plan.md notes `watchedAt` as the durable source of truth for exactly this case).
@@ -275,6 +278,7 @@ Another user's public watch history (their diary), subject to the same private-p
 **Query**: same as `/watch-log/me`.
 **Response `200`**: same shape as `/watch-log/me`.
 **Errors**: `403` target profile is private and caller doesn't follow them.
+**Not yet implemented**: deferred out of Phase 4 — needs the Follow graph (Phase 6) to exist first for the private-profile gating check.
 
 ---
 

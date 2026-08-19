@@ -48,13 +48,34 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       return user ? user : null;
     }
 
-    if (err || !user) {
-      // Never rethrow the raw error (e.g. a JsonWebTokenError from an
-      // invalid/malformed token) — it isn't an HttpException, so it would
-      // fall through to the global filter's 500 branch instead of a clean 401.
-      throw new UnauthorizedException(
-        err instanceof Error ? err.message : undefined,
-      );
+    if (err) {
+      // `err` here only ever originates from JwtStrategy.validate() itself
+      // throwing — passport-jwt reports a malformed/expired JWT via `info`,
+      // not `err` (verification failures call self.fail(), only the verify
+      // callback's own thrown errors call self.error() — see passport-jwt's
+      // strategy.js). So this is either our own deliberate
+      // UnauthorizedException (unknown/deleted user — already a safe,
+      // well-formed HttpException) or an unexpected error such as a DB
+      // failure inside validate(). Previously this was unconditionally
+      // re-wrapped as `UnauthorizedException(err.message)`, which mislabeled
+      // infra failures as 401s and leaked their internal message straight to
+      // the client (bug found via testing — see plan.md). Rethrowing
+      // unchanged lets an HttpException pass through exactly as intended,
+      // and lets anything else fall to the global filter's generic,
+      // non-leaking 500 instead. Always throws a genuine Error (wrapping a
+      // non-Error rejection reason, which shouldn't occur in practice but
+      // isn't guaranteed by the type) rather than an arbitrary thrown value.
+      throw err instanceof Error
+        ? err
+        : new Error(
+            typeof err === 'string'
+              ? err
+              : 'Non-Error value thrown by JwtStrategy.validate()',
+          );
+    }
+
+    if (!user) {
+      throw new UnauthorizedException();
     }
 
     return user;

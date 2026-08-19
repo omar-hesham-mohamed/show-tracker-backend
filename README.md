@@ -45,8 +45,10 @@ The API is served under `/api/v1` (except `GET /health`, which is unprefixed for
 ```bash
 npm test              # unit tests
 npm run test:cov      # unit tests with coverage
-npm run test:e2e       # e2e tests (needs a real Postgres connection)
+npm run test:e2e       # e2e tests (needs a real Postgres connection AND a valid TMDB_ACCESS_TOKEN — the TMDB e2e specs call the real TMDB API, no mocking)
 ```
+
+e2e tests run against whatever Postgres `DATABASE_URL` points at (typically your local dev DB) — each spec cleans up the users/rows it creates afterward. They create real users with `e2e*`-prefixed usernames/emails, which is safe to grep for if you ever need to confirm nothing was left behind.
 
 ## Other scripts
 
