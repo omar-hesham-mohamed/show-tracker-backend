@@ -25,6 +25,12 @@ function makeEntry(overrides: Record<string, unknown> = {}) {
   };
 }
 
+const streakSnapshot = {
+  currentStreakCount: 3,
+  longestStreakCount: 5,
+  lastStreakDate: new Date('2026-08-07T00:00:00.000Z'),
+};
+
 describe('WatchLogService', () => {
   let prisma: {
     watchLogEntry: {
@@ -35,8 +41,10 @@ describe('WatchLogService', () => {
       delete: jest.Mock;
     };
     episode: { findFirst: jest.Mock };
+    $transaction: jest.Mock;
   };
   let tmdbService: { getShowDetail: jest.Mock };
+  let streakService: { recomputeStreak: jest.Mock };
   let service: WatchLogService;
 
   beforeEach(() => {
@@ -49,9 +57,20 @@ describe('WatchLogService', () => {
         delete: jest.fn(),
       },
       episode: { findFirst: jest.fn() },
+      // Real Prisma runs the callback against a transaction client with the
+      // same model delegates — the mock just reuses `prisma` itself for
+      // that, since these tests don't care about the distinction.
+      $transaction: jest.fn((callback: (tx: unknown) => unknown) =>
+        callback(prisma),
+      ),
     };
     tmdbService = { getShowDetail: jest.fn() };
-    service = new WatchLogService(prisma as any, tmdbService as any);
+    streakService = { recomputeStreak: jest.fn() };
+    service = new WatchLogService(
+      prisma as any,
+      tmdbService as any,
+      streakService as any,
+    );
   });
 
   // ---------------------------------------------------------------------
@@ -68,6 +87,7 @@ describe('WatchLogService', () => {
     it('resolves the show via TmdbService (reusing its cache-aside) and creates the entry', async () => {
       tmdbService.getShowDetail.mockResolvedValue({ id: 'show-1' });
       prisma.watchLogEntry.create.mockResolvedValue(makeEntry());
+      streakService.recomputeStreak.mockResolvedValue(streakSnapshot);
 
       const result = await service.create('user-1', baseDto);
 
@@ -85,6 +105,38 @@ describe('WatchLogService', () => {
         include: { show: true },
       });
       expect(result.show.title).toBe('Game of Thrones');
+    });
+
+    it('recomputes the streak and includes streakAfterWrite when the new entry is WATCHED', async () => {
+      tmdbService.getShowDetail.mockResolvedValue({ id: 'show-1' });
+      prisma.watchLogEntry.create.mockResolvedValue(makeEntry());
+      streakService.recomputeStreak.mockResolvedValue(streakSnapshot);
+
+      const result = await service.create('user-1', baseDto);
+
+      expect(streakService.recomputeStreak).toHaveBeenCalledWith(
+        'user-1',
+        prisma,
+      );
+      expect(result.streakAfterWrite).toEqual({
+        currentStreakCount: 3,
+        longestStreakCount: 5,
+      });
+    });
+
+    it('does not recompute the streak or include streakAfterWrite for a non-WATCHED status', async () => {
+      tmdbService.getShowDetail.mockResolvedValue({ id: 'show-1' });
+      prisma.watchLogEntry.create.mockResolvedValue(
+        makeEntry({ status: WatchStatus.WANT_TO_WATCH }),
+      );
+
+      const result = await service.create('user-1', {
+        ...baseDto,
+        status: WatchStatus.WANT_TO_WATCH,
+      });
+
+      expect(streakService.recomputeStreak).not.toHaveBeenCalled();
+      expect(result.streakAfterWrite).toBeUndefined();
     });
 
     it('rejects an obviously spoofed future watchedAt without calling TMDB', async () => {
@@ -107,6 +159,7 @@ describe('WatchLogService', () => {
       prisma.watchLogEntry.create.mockResolvedValue(
         makeEntry({ episodeId: 'ep-1' }),
       );
+      streakService.recomputeStreak.mockResolvedValue(streakSnapshot);
 
       await service.create('user-1', { ...baseDto, episodeId: 'ep-1' });
 
@@ -151,6 +204,17 @@ describe('WatchLogService', () => {
       );
       expect(result.nextCursor).toBeNull();
       expect(result.items).toHaveLength(1);
+    });
+
+    it('never includes streakAfterWrite on list items (only POST/PATCH set it)', async () => {
+      prisma.watchLogEntry.findMany.mockResolvedValue([makeEntry()]);
+
+      const result = await service.findMine('user-1', {
+        limit: 20,
+        sort: 'watchedAt_desc',
+      } as any);
+
+      expect(result.items[0].streakAfterWrite).toBeUndefined();
     });
 
     it('returns a nextCursor when more rows exist than the page limit', async () => {
@@ -239,12 +303,13 @@ describe('WatchLogService', () => {
       );
     });
 
-    it('findOne returns the mapped entry when owned', async () => {
+    it('findOne returns the mapped entry when owned, without streakAfterWrite', async () => {
       prisma.watchLogEntry.findFirst.mockResolvedValue(makeEntry());
 
       const result = await service.findOne('user-1', 'entry-1');
 
       expect(result.id).toBe('entry-1');
+      expect(result.streakAfterWrite).toBeUndefined();
     });
 
     it('update applies a partial patch and re-validates the rating grid via the DTO layer', async () => {
@@ -268,6 +333,7 @@ describe('WatchLogService', () => {
     it('update applies status, rating, and watchedAt individually when present in the patch', async () => {
       prisma.watchLogEntry.findFirst.mockResolvedValue(makeEntry());
       prisma.watchLogEntry.update.mockResolvedValue(makeEntry());
+      streakService.recomputeStreak.mockResolvedValue(streakSnapshot);
 
       await service.update('user-1', 'entry-1', {
         status: WatchStatus.WATCHING,
@@ -283,6 +349,90 @@ describe('WatchLogService', () => {
           watchedAt: new Date('2026-08-01T00:00:00.000Z'),
         },
         include: { show: true },
+      });
+    });
+
+    describe('streak recompute triggers (endpoints.md: "changing status to/from WATCHED or changing watchedAt")', () => {
+      it('recomputes when status changes FROM WATCHED to something else', async () => {
+        prisma.watchLogEntry.findFirst.mockResolvedValue(
+          makeEntry({ status: WatchStatus.WATCHED }),
+        );
+        prisma.watchLogEntry.update.mockResolvedValue(
+          makeEntry({ status: WatchStatus.WATCHING }),
+        );
+        streakService.recomputeStreak.mockResolvedValue(streakSnapshot);
+
+        const result = await service.update('user-1', 'entry-1', {
+          status: WatchStatus.WATCHING,
+        });
+
+        expect(streakService.recomputeStreak).toHaveBeenCalledWith(
+          'user-1',
+          prisma,
+        );
+        expect(result.streakAfterWrite).toBeDefined();
+      });
+
+      it('recomputes when status changes TO WATCHED from something else', async () => {
+        prisma.watchLogEntry.findFirst.mockResolvedValue(
+          makeEntry({ status: WatchStatus.WANT_TO_WATCH }),
+        );
+        prisma.watchLogEntry.update.mockResolvedValue(
+          makeEntry({ status: WatchStatus.WATCHED }),
+        );
+        streakService.recomputeStreak.mockResolvedValue(streakSnapshot);
+
+        await service.update('user-1', 'entry-1', {
+          status: WatchStatus.WATCHED,
+        });
+
+        expect(streakService.recomputeStreak).toHaveBeenCalledWith(
+          'user-1',
+          prisma,
+        );
+      });
+
+      it('recomputes when watchedAt changes on an entry that is (and stays) WATCHED', async () => {
+        prisma.watchLogEntry.findFirst.mockResolvedValue(
+          makeEntry({ status: WatchStatus.WATCHED }),
+        );
+        prisma.watchLogEntry.update.mockResolvedValue(makeEntry());
+        streakService.recomputeStreak.mockResolvedValue(streakSnapshot);
+
+        await service.update('user-1', 'entry-1', { watchedAt: '2026-08-01' });
+
+        expect(streakService.recomputeStreak).toHaveBeenCalledWith(
+          'user-1',
+          prisma,
+        );
+      });
+
+      it('does NOT recompute for a rating/note-only patch on a WATCHED entry', async () => {
+        prisma.watchLogEntry.findFirst.mockResolvedValue(
+          makeEntry({ status: WatchStatus.WATCHED }),
+        );
+        prisma.watchLogEntry.update.mockResolvedValue(makeEntry());
+
+        const result = await service.update('user-1', 'entry-1', {
+          rating: 4,
+          note: 'still great',
+        });
+
+        expect(streakService.recomputeStreak).not.toHaveBeenCalled();
+        expect(result.streakAfterWrite).toBeUndefined();
+      });
+
+      it('does NOT recompute when watchedAt changes on an entry that was never WATCHED and stays not-WATCHED', async () => {
+        prisma.watchLogEntry.findFirst.mockResolvedValue(
+          makeEntry({ status: WatchStatus.WANT_TO_WATCH }),
+        );
+        prisma.watchLogEntry.update.mockResolvedValue(
+          makeEntry({ status: WatchStatus.WANT_TO_WATCH }),
+        );
+
+        await service.update('user-1', 'entry-1', { watchedAt: '2026-08-01' });
+
+        expect(streakService.recomputeStreak).not.toHaveBeenCalled();
       });
     });
 
@@ -308,14 +458,32 @@ describe('WatchLogService', () => {
       expect(prisma.watchLogEntry.update).not.toHaveBeenCalled();
     });
 
-    it('remove deletes an owned entry', async () => {
-      prisma.watchLogEntry.findFirst.mockResolvedValue(makeEntry());
+    it('remove deletes an owned WATCHED entry and recomputes the streak', async () => {
+      prisma.watchLogEntry.findFirst.mockResolvedValue(
+        makeEntry({ status: WatchStatus.WATCHED }),
+      );
+      streakService.recomputeStreak.mockResolvedValue(streakSnapshot);
 
       await service.remove('user-1', 'entry-1');
 
       expect(prisma.watchLogEntry.delete).toHaveBeenCalledWith({
         where: { id: 'entry-1' },
       });
+      expect(streakService.recomputeStreak).toHaveBeenCalledWith(
+        'user-1',
+        prisma,
+      );
+    });
+
+    it('remove does not recompute the streak for a non-WATCHED entry', async () => {
+      prisma.watchLogEntry.findFirst.mockResolvedValue(
+        makeEntry({ status: WatchStatus.WANT_TO_WATCH }),
+      );
+
+      await service.remove('user-1', 'entry-1');
+
+      expect(prisma.watchLogEntry.delete).toHaveBeenCalled();
+      expect(streakService.recomputeStreak).not.toHaveBeenCalled();
     });
 
     it('remove 404s when the entry is not owned by the caller', async () => {

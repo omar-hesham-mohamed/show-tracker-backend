@@ -7,6 +7,11 @@ export interface ShowSummaryDto {
   posterPath: string | null;
 }
 
+export interface StreakAfterWriteDto {
+  currentStreakCount: number;
+  longestStreakCount: number;
+}
+
 export interface WatchLogEntryDto {
   id: string;
   userId: string;
@@ -18,6 +23,8 @@ export interface WatchLogEntryDto {
   note: string;
   createdAt: string;
   updatedAt: string;
+  /** Only present on POST/PATCH responses that actually touched streak-relevant fields (endpoints.md). */
+  streakAfterWrite?: StreakAfterWriteDto;
 }
 
 export type WatchLogEntryWithShow = WatchLogEntry & { show: Show };
@@ -28,6 +35,7 @@ function toDateOnlyString(date: Date): string {
 
 export function toWatchLogEntryDto(
   entry: WatchLogEntryWithShow,
+  streak?: StreakAfterWriteDto,
 ): WatchLogEntryDto {
   return {
     id: entry.id,
@@ -45,5 +53,13 @@ export function toWatchLogEntryDto(
     note: entry.note,
     createdAt: entry.createdAt.toISOString(),
     updatedAt: entry.updatedAt.toISOString(),
+    ...(streak
+      ? {
+          streakAfterWrite: {
+            currentStreakCount: streak.currentStreakCount,
+            longestStreakCount: streak.longestStreakCount,
+          },
+        }
+      : {}),
   };
 }

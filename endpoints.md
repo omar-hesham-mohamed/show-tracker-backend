@@ -77,6 +77,7 @@ Invalidates the presented refresh token (body) server-side.
 
 ### `GET /users/me` — Auth required
 Full profile for the logged-in user, including private fields (email, timezone, streak).
+**As-built (Phase 5)**: built ahead of its originally-unassigned phase status specifically so streak data has a way to be read independent of a write (see plan.md's Phase 5 Decisions Log). `currentStreakCount` applies a read-time freshness correction — displays `0` instead of the stored value once more than a day has passed with no new `WATCHED` log, without persisting that correction (the next real write's reconciliation does). `followerCount`/`followingCount` are real, live counts (the `Follow` table already exists) — both just read `0` for everyone until Phase 6 adds ways to create `Follow` rows. `PATCH /users/me` below, avatar upload, and `DELETE /users/me` remain unbuilt (Phase 6/8).
 **Response `200`**
 ```json
 {
@@ -226,7 +227,7 @@ TV-only (fixed `tv` path segment, not a `:mediaType` param — a movie has no se
 ### `POST /watch-log` — Auth required
 Create a log entry. Triggers streak recompute when `status: WATCHED` (plan.md §Streak). No uniqueness constraint on `(userId, showId)` — rewatches allowed.
 
-**Not yet implemented (Phase 4 as-built)**: `streakAfterWrite` is omitted from the response below — write-time streak recompute is Phase 5's scope (plan.md Decisions Log). Phase 4's `watchedAt` handling only does a loose, honor-system future-date sanity check (independent of the actual streak-day decision), and the show is resolved via the existing `TmdbService.getShowDetail` cache-aside path rather than any new TMDB-fetch code.
+**As-built (Phase 5)**: `streakAfterWrite` uses full reconciliation, not an incremental increment — see plan.md's Phase 5 Decisions Log entry. Only present when the write actually touched streak-relevant fields (a `WATCHED` create, or a `PATCH` changing `status`/`watchedAt` on an entry that is/was `WATCHED`) — omitted otherwise.
 **Request**
 ```json
 {
@@ -267,10 +268,9 @@ Update rating/note/status/watchedAt. Changing `status` to/from `WATCHED` or chan
 **Request**: any subset of `{ status, rating, watchedAt, note }`.
 **Response `200`**: updated entry, same shape as create response (including `streakAfterWrite` if the write affected streak-relevant fields).
 **Errors**: `404` not found/not owned.
-**Not yet implemented (Phase 4 as-built)**: same `streakAfterWrite` deferral as `POST /watch-log` above.
 
 ### `DELETE /watch-log/:id` — Auth required (owner only)
-Deleting a `WATCHED` entry that was the sole entry for its day triggers a streak reconciliation (recompute from remaining `watchedAt` rows — plan.md notes `watchedAt` as the durable source of truth for exactly this case).
+Deleting a `WATCHED` entry triggers a streak reconciliation (recompute from remaining `watchedAt` rows — plan.md notes `watchedAt` as the durable source of truth for exactly this case). **As-built (Phase 5)**: recompute always runs for any deleted `WATCHED` entry, rather than first checking whether it was the sole entry for its day — full reconciliation makes that check unnecessary (it's a no-op in effect if another entry still covers the day).
 **Response `204`**
 
 ### `GET /watch-log/user/:username` — Optional auth, paginated

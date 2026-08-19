@@ -3,9 +3,10 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, WatchStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TmdbService } from '../tmdb/tmdb.service';
+import { StreakService } from '../streak/streak.service';
 import { decodeCursor, encodeCursor } from '../common/pagination/cursor.util';
 import { CreateWatchLogDto } from './dto/create-watch-log.dto';
 import { UpdateWatchLogDto } from './dto/update-watch-log.dto';
@@ -41,6 +42,7 @@ export class WatchLogService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tmdbService: TmdbService,
+    private readonly streakService: StreakService,
   ) {}
 
   async create(
@@ -63,20 +65,29 @@ export class WatchLogService {
       }
     }
 
-    const entry = await this.prisma.watchLogEntry.create({
-      data: {
-        userId,
-        showId: show.id,
-        episodeId: dto.episodeId ?? null,
-        status: dto.status,
-        rating: dto.rating ?? null,
-        watchedAt: new Date(`${dto.watchedAt}T00:00:00.000Z`),
-        note: dto.note ?? '',
-      },
-      include: { show: true },
+    const { entry, streak } = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.watchLogEntry.create({
+        data: {
+          userId,
+          showId: show.id,
+          episodeId: dto.episodeId ?? null,
+          status: dto.status,
+          rating: dto.rating ?? null,
+          watchedAt: new Date(`${dto.watchedAt}T00:00:00.000Z`),
+          note: dto.note ?? '',
+        },
+        include: { show: true },
+      });
+
+      const streakSnapshot =
+        created.status === WatchStatus.WATCHED
+          ? await this.streakService.recomputeStreak(userId, tx)
+          : undefined;
+
+      return { entry: created, streak: streakSnapshot };
     });
 
-    return toWatchLogEntryDto(entry);
+    return toWatchLogEntryDto(entry, streak);
   }
 
   async findMine(
@@ -134,7 +145,14 @@ export class WatchLogService {
           })
         : null;
 
-    return { items: page.map(toWatchLogEntryDto), nextCursor };
+    // Not `page.map(toWatchLogEntryDto)` — Array.map passes (element, index,
+    // array) to its callback, and toWatchLogEntryDto's now-optional second
+    // parameter (streak) would receive the numeric index instead of
+    // undefined, corrupting every item's streakAfterWrite field.
+    return {
+      items: page.map((row) => toWatchLogEntryDto(row)),
+      nextCursor,
+    };
   }
 
   async findOne(userId: string, id: string): Promise<WatchLogEntryDto> {
@@ -147,31 +165,57 @@ export class WatchLogService {
     id: string,
     dto: UpdateWatchLogDto,
   ): Promise<WatchLogEntryDto> {
-    await this.findOwnedOrThrow(userId, id);
+    const existing = await this.findOwnedOrThrow(userId, id);
 
     if (dto.watchedAt) {
       assertNotSpoofedFutureDate(dto.watchedAt);
     }
 
-    const updated = await this.prisma.watchLogEntry.update({
-      where: { id },
-      data: {
-        ...(dto.status !== undefined ? { status: dto.status } : {}),
-        ...(dto.rating !== undefined ? { rating: dto.rating } : {}),
-        ...(dto.watchedAt !== undefined
-          ? { watchedAt: new Date(`${dto.watchedAt}T00:00:00.000Z`) }
-          : {}),
-        ...(dto.note !== undefined ? { note: dto.note } : {}),
-      },
-      include: { show: true },
+    // Recompute is needed whenever status or watchedAt is touched while the
+    // entry is/becomes WATCHED — a status flip either direction, or a
+    // watchedAt change on an entry that is/was WATCHED. Rating/note-only
+    // patches, or touching a non-WATCHED entry that stays non-WATCHED, never
+    // affect the streak (endpoints.md).
+    const wasWatched = existing.status === WatchStatus.WATCHED;
+    const willBeWatched =
+      (dto.status ?? existing.status) === WatchStatus.WATCHED;
+    const touchesStreak =
+      (dto.status !== undefined || dto.watchedAt !== undefined) &&
+      (wasWatched || willBeWatched);
+
+    const { entry, streak } = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.watchLogEntry.update({
+        where: { id },
+        data: {
+          ...(dto.status !== undefined ? { status: dto.status } : {}),
+          ...(dto.rating !== undefined ? { rating: dto.rating } : {}),
+          ...(dto.watchedAt !== undefined
+            ? { watchedAt: new Date(`${dto.watchedAt}T00:00:00.000Z`) }
+            : {}),
+          ...(dto.note !== undefined ? { note: dto.note } : {}),
+        },
+        include: { show: true },
+      });
+
+      const streakSnapshot = touchesStreak
+        ? await this.streakService.recomputeStreak(userId, tx)
+        : undefined;
+
+      return { entry: updated, streak: streakSnapshot };
     });
 
-    return toWatchLogEntryDto(updated);
+    return toWatchLogEntryDto(entry, streak);
   }
 
   async remove(userId: string, id: string): Promise<void> {
-    await this.findOwnedOrThrow(userId, id);
-    await this.prisma.watchLogEntry.delete({ where: { id } });
+    const existing = await this.findOwnedOrThrow(userId, id);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.watchLogEntry.delete({ where: { id } });
+      if (existing.status === WatchStatus.WATCHED) {
+        await this.streakService.recomputeStreak(userId, tx);
+      }
+    });
   }
 
   private async findOwnedOrThrow(
