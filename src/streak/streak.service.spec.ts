@@ -244,4 +244,66 @@ describe('StreakService', () => {
     expect(tx.watchLogEntry.findMany).toHaveBeenCalled();
     expect(prisma.watchLogEntry.findMany).not.toHaveBeenCalled();
   });
+
+  // ---------------------------------------------------------------------
+  // getHeatmap
+  // ---------------------------------------------------------------------
+  describe('getHeatmap', () => {
+    it('zero-fills every day in the range when there is no activity', async () => {
+      prisma.watchLogEntry.findMany.mockResolvedValue([]);
+
+      const result = await service.getHeatmap('user-1', 5);
+
+      expect(result).toHaveLength(5);
+      expect(result.every((day) => day.count === 0)).toBe(true);
+    });
+
+    it('queries only WATCHED entries within the trailing range', async () => {
+      prisma.watchLogEntry.findMany.mockResolvedValue([]);
+
+      await service.getHeatmap('user-1', 365);
+
+      const call = prisma.watchLogEntry.findMany.mock.calls[0][0];
+      expect(call.where.userId).toBe('user-1');
+      expect(call.where.status).toBe(WatchStatus.WATCHED);
+      expect(call.where.watchedAt.gte).toBeInstanceOf(Date);
+    });
+
+    it('counts multiple entries on the same day correctly', async () => {
+      prisma.watchLogEntry.findMany.mockResolvedValue(
+        watchedDates('2026-08-19', '2026-08-19', '2026-08-18'),
+      );
+
+      const result = await service.getHeatmap('user-1', 5);
+
+      const aug19 = result.find((d) => d.date === '2026-08-19');
+      const aug18 = result.find((d) => d.date === '2026-08-18');
+      expect(aug19?.count).toBe(2);
+      expect(aug18?.count).toBe(1);
+    });
+
+    it('returns exactly `days` entries, ending on today, in ascending date order', async () => {
+      prisma.watchLogEntry.findMany.mockResolvedValue([]);
+
+      const result = await service.getHeatmap('user-1', 7);
+
+      expect(result).toHaveLength(7);
+      const todayKey = new Date().toISOString().slice(0, 10);
+      expect(result[result.length - 1].date).toBe(todayKey);
+      // ascending order — each entry's date is exactly 1 day after the previous.
+      for (let i = 1; i < result.length; i++) {
+        const prev = new Date(`${result[i - 1].date}T00:00:00.000Z`);
+        const curr = new Date(`${result[i].date}T00:00:00.000Z`);
+        expect(curr.getTime() - prev.getTime()).toBe(86_400_000);
+      }
+    });
+
+    it('defaults to a 365-day range', async () => {
+      prisma.watchLogEntry.findMany.mockResolvedValue([]);
+
+      const result = await service.getHeatmap('user-1');
+
+      expect(result).toHaveLength(365);
+    });
+  });
 });

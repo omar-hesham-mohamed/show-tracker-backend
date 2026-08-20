@@ -11,6 +11,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { OptionalAuth } from '../common/decorators/optional-auth.decorator';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user.type';
 import { WatchLogService } from './watch-log.service';
 import { CreateWatchLogDto } from './dto/create-watch-log.dto';
@@ -35,6 +36,16 @@ export class WatchLogController {
     @Query() dto: ListWatchLogDto,
   ) {
     return this.watchLogService.findMine(user.id, dto);
+  }
+
+  @OptionalAuth()
+  @Get('user/:username')
+  findForUser(
+    @CurrentUser() user: AuthenticatedUser | null,
+    @Param('username') username: string,
+    @Query() dto: ListWatchLogDto,
+  ) {
+    return this.watchLogService.findForUser(username, user?.id ?? null, dto);
   }
 
   @Get(':id')

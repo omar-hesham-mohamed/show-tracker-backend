@@ -16,7 +16,7 @@ describe('Watch Log (e2e)', () => {
   const userIds: string[] = [];
 
   beforeAll(async () => {
-    app = await createTestApp();
+    app = await createTestApp({ disableThrottling: true });
     server = app.getHttpServer();
 
     const suffix = uniqueSuffix();
@@ -350,6 +350,105 @@ describe('Watch Log (e2e)', () => {
         currentStreakCount: 1,
         longestStreakCount: 3,
       });
+    });
+  });
+
+  describe('GET /watch-log/user/:username — diary (Phase 6, unblocked from Phase 4)', () => {
+    it('404s an unknown username', async () => {
+      await request(server)
+        .get('/api/v1/watch-log/user/no-such-user')
+        .set(authA())
+        .expect(404);
+    });
+
+    it('403s a private profile the caller does not follow, 200s once they do', async () => {
+      const suffix = uniqueSuffix();
+      const owner = await request(server)
+        .post('/api/v1/auth/signup')
+        .send({
+          email: `e2e-diary-owner-${suffix}@example.com`,
+          username: `e2ediaryown${suffix}`,
+          password: 'testpass123',
+          displayName: 'E2E Diary Owner',
+          timezone: 'UTC',
+        })
+        .expect(201);
+      userIds.push(owner.body.user.id as string);
+      const ownerToken = owner.body.accessToken as string;
+      const ownerUsername = owner.body.user.username as string;
+
+      await request(server)
+        .patch('/api/v1/users/me')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ isPrivate: true })
+        .expect(200);
+
+      await request(server)
+        .post('/api/v1/watch-log')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({
+          tmdbId: 1399,
+          mediaType: 'tv',
+          status: 'WATCHED',
+          watchedAt: '2026-08-07',
+        })
+        .expect(201);
+
+      await request(server)
+        .get(`/api/v1/watch-log/user/${ownerUsername}`)
+        .set(authA())
+        .expect(403);
+
+      await request(server)
+        .post(`/api/v1/users/${ownerUsername}/follow`)
+        .set(authA())
+        .expect(204);
+
+      const res = await request(server)
+        .get(`/api/v1/watch-log/user/${ownerUsername}`)
+        .set(authA())
+        .expect(200);
+      expect(res.body.items.length).toBeGreaterThan(0);
+
+      await request(server)
+        .delete(`/api/v1/users/${ownerUsername}/follow`)
+        .set(authA())
+        .expect(204);
+    });
+
+    it('works for an unauthenticated caller on a public diary, returning real entries', async () => {
+      const suffix = uniqueSuffix();
+      const owner = await request(server)
+        .post('/api/v1/auth/signup')
+        .send({
+          email: `e2e-diary-pub-${suffix}@example.com`,
+          username: `e2ediarypub${suffix}`,
+          password: 'testpass123',
+          displayName: 'E2E Diary Public',
+          timezone: 'UTC',
+        })
+        .expect(201);
+      userIds.push(owner.body.user.id as string);
+      const ownerUsername = owner.body.user.username as string;
+
+      await request(server)
+        .post('/api/v1/watch-log')
+        .set('Authorization', `Bearer ${owner.body.accessToken as string}`)
+        .send({
+          tmdbId: 1399,
+          mediaType: 'tv',
+          status: 'WATCHED',
+          watchedAt: '2026-08-07',
+        })
+        .expect(201);
+
+      const res = await request(server)
+        .get(`/api/v1/watch-log/user/${ownerUsername}`)
+        .expect(200);
+      expect(res.body.items).toHaveLength(1);
+      expect(res.body.items[0].show).toEqual(
+        expect.objectContaining({ tmdbId: 1399 }),
+      );
     });
   });
 });

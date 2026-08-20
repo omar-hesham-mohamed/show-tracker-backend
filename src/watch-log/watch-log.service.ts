@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -7,6 +8,7 @@ import { Prisma, WatchStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TmdbService } from '../tmdb/tmdb.service';
 import { StreakService } from '../streak/streak.service';
+import { FollowService } from '../follow/follow.service';
 import { decodeCursor, encodeCursor } from '../common/pagination/cursor.util';
 import { CreateWatchLogDto } from './dto/create-watch-log.dto';
 import { UpdateWatchLogDto } from './dto/update-watch-log.dto';
@@ -43,6 +45,7 @@ export class WatchLogService {
     private readonly prisma: PrismaService,
     private readonly tmdbService: TmdbService,
     private readonly streakService: StreakService,
+    private readonly followService: FollowService,
   ) {}
 
   async create(
@@ -94,10 +97,44 @@ export class WatchLogService {
     userId: string,
     dto: ListWatchLogDto,
   ): Promise<WatchLogListResult> {
+    return this.listEntries(userId, dto);
+  }
+
+  /**
+   * Another user's diary — same privacy domain as GET /users/:username,
+   * 403 when gated (endpoints.md's own pre-existing spec for this route,
+   * kept as-is — not the profile's stub pattern).
+   */
+  async findForUser(
+    username: string,
+    viewerId: string | null,
+    dto: ListWatchLogDto,
+  ): Promise<WatchLogListResult> {
+    const target = await this.prisma.user.findUnique({
+      where: { username: username.toLowerCase() },
+    });
+    if (!target) {
+      throw new NotFoundException(`User not found: ${username}`);
+    }
+    if (!(await this.followService.canView(viewerId, target))) {
+      throw new ForbiddenException('This profile is private');
+    }
+    return this.listEntries(target.id, dto);
+  }
+
+  /**
+   * The pagination/query core never actually cared whose userId it was
+   * filtering on — factored out so findMine/findForUser share one
+   * implementation instead of duplicating the keyset-pagination logic.
+   */
+  private async listEntries(
+    targetUserId: string,
+    dto: ListWatchLogDto,
+  ): Promise<WatchLogListResult> {
     const desc = dto.sort === 'watchedAt_desc';
 
     const where: Prisma.WatchLogEntryWhereInput = {
-      userId,
+      userId: targetUserId,
       ...(dto.status ? { status: dto.status } : {}),
     };
 

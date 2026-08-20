@@ -32,7 +32,7 @@ describe('Auth throttling (e2e)', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: `e2e-throttle-${suffix}-${i}@example.com`,
-          username: `e2ethrottle${suffix}${i}`,
+          username: `e2ethr${suffix}${i}`, // kept short — the "over" variant below must also fit the 20-char username limit regardless of uniqueSuffix()'s length
           password: 'testpass123',
           displayName: 'E2E Throttle Tester',
           timezone: 'UTC',
@@ -45,7 +45,7 @@ describe('Auth throttling (e2e)', () => {
       .post('/api/v1/auth/signup')
       .send({
         email: `e2e-throttle-${suffix}-over@example.com`,
-        username: `e2ethrottle${suffix}over`,
+        username: `e2ethr${suffix}over`,
         password: 'testpass123',
         displayName: 'E2E Throttle Tester',
         timezone: 'UTC',

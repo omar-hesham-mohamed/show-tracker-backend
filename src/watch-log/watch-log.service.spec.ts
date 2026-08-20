@@ -1,4 +1,8 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { MediaType, WatchStatus } from '@prisma/client';
 import { WatchLogService } from './watch-log.service';
 import { encodeCursor } from '../common/pagination/cursor.util';
@@ -41,10 +45,12 @@ describe('WatchLogService', () => {
       delete: jest.Mock;
     };
     episode: { findFirst: jest.Mock };
+    user: { findUnique: jest.Mock };
     $transaction: jest.Mock;
   };
   let tmdbService: { getShowDetail: jest.Mock };
   let streakService: { recomputeStreak: jest.Mock };
+  let followService: { canView: jest.Mock };
   let service: WatchLogService;
 
   beforeEach(() => {
@@ -57,6 +63,7 @@ describe('WatchLogService', () => {
         delete: jest.fn(),
       },
       episode: { findFirst: jest.fn() },
+      user: { findUnique: jest.fn() },
       // Real Prisma runs the callback against a transaction client with the
       // same model delegates — the mock just reuses `prisma` itself for
       // that, since these tests don't care about the distinction.
@@ -66,10 +73,12 @@ describe('WatchLogService', () => {
     };
     tmdbService = { getShowDetail: jest.fn() };
     streakService = { recomputeStreak: jest.fn() };
+    followService = { canView: jest.fn().mockResolvedValue(true) };
     service = new WatchLogService(
       prisma as any,
       tmdbService as any,
       streakService as any,
+      followService as any,
     );
   });
 
@@ -493,6 +502,68 @@ describe('WatchLogService', () => {
         NotFoundException,
       );
       expect(prisma.watchLogEntry.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // findForUser — another user's diary (Phase 6)
+  // ---------------------------------------------------------------------
+  describe('findForUser', () => {
+    it('404s on an unknown username', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.findForUser('nobody', 'viewer-1', { limit: 20 } as any),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('403s when the target profile is private and the caller cannot view it', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'target-1',
+        isPrivate: true,
+      });
+      followService.canView.mockResolvedValue(false);
+
+      await expect(
+        service.findForUser('sam', 'viewer-1', { limit: 20 } as any),
+      ).rejects.toThrow(ForbiddenException);
+      expect(prisma.watchLogEntry.findMany).not.toHaveBeenCalled();
+    });
+
+    it("returns the target user's entries when viewable, using the same pagination as findMine", async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'target-1',
+        isPrivate: false,
+      });
+      followService.canView.mockResolvedValue(true);
+      prisma.watchLogEntry.findMany.mockResolvedValue([makeEntry()]);
+
+      const result = await service.findForUser('sam', 'viewer-1', {
+        limit: 20,
+      } as any);
+
+      expect(prisma.watchLogEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ userId: 'target-1' }),
+        }),
+      );
+      expect(result.items).toHaveLength(1);
+    });
+
+    it('works for an anonymous viewer on a public profile', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'target-1',
+        isPrivate: false,
+      });
+      followService.canView.mockResolvedValue(true);
+      prisma.watchLogEntry.findMany.mockResolvedValue([]);
+
+      await service.findForUser('sam', null, { limit: 20 } as any);
+
+      expect(followService.canView).toHaveBeenCalledWith(null, {
+        id: 'target-1',
+        isPrivate: false,
+      });
     });
   });
 });

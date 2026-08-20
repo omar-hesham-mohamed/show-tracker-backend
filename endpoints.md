@@ -90,6 +90,7 @@ Full profile for the logged-in user, including private fields (email, timezone, 
 
 ### `PATCH /users/me` — Auth required
 Partial update. All fields optional.
+**As-built (Phase 6)**: built in full now, not split across phases — "privacy toggle" was an explicit Phase 6 deliverable and this is the one documented endpoint for it. `bio` capped at 500 characters. An explicit `null` on any field is rejected with `400` (`@ValidateIf`, not `@IsOptional()` — same fix as `update-watch-log.dto.ts`'s found-via-testing bug, applied here from the start rather than reintroduced).
 **Request**
 ```json
 { "displayName": "Mazen A.", "bio": "watching too much TV", "timezone": "Africa/Cairo", "isPrivate": true }
@@ -111,6 +112,7 @@ Account deletion. Cascades or anonymizes per plan.md's polish-milestone design (
 
 ### `GET /users/:username` — Optional auth
 Public profile lookup by username. If the target is private and the caller doesn't follow them (or isn't authenticated), only a minimal stub is returned.
+**As-built (Phase 6)**: viewing your own username always returns the full shape regardless of `isPrivate` (self-view bypass) — you obviously have access to your own data.
 **Response `200` (public/followed)**
 ```json
 {
@@ -149,9 +151,10 @@ List of users who follow `:username`.
   "nextCursor": "opaque-cursor-or-null"
 }
 ```
+**As-built (Phase 6)**: privacy-gated the same as the profile — a private `:username` that the caller doesn't follow (and isn't) returns `200 { "items": [], "nextCursor": null }`, not `403` (this wasn't documented either way before Phase 6; decided to match the profile's own "degrade, don't error" precedent — plan.md's Phase 6 Decisions Log). `isFollowedByMe` on each item reflects whether the *caller* follows that specific listed user — not the followerId of the caller's own possible entry in the list.
 
 ### `GET /users/:username/following` — Optional auth, paginated
-Same shape as `/followers`, listing who `:username` follows.
+Same shape as `/followers`, listing who `:username` follows. Same privacy-gating behavior.
 
 ---
 
@@ -278,7 +281,6 @@ Another user's public watch history (their diary), subject to the same private-p
 **Query**: same as `/watch-log/me`.
 **Response `200`**: same shape as `/watch-log/me`.
 **Errors**: `403` target profile is private and caller doesn't follow them.
-**Not yet implemented**: deferred out of Phase 4 — needs the Follow graph (Phase 6) to exist first for the private-profile gating check.
 
 ---
 
@@ -291,6 +293,21 @@ Streak counters are denormalized on `User` and surfaced there too (`GET /users/m
 ```json
 { "currentStreakCount": 6, "longestStreakCount": 12, "lastStreakDate": "2026-08-07" }
 ```
+**Errors**: `404` no such username, `403` target profile is private and caller doesn't follow them (matches the diary endpoint's precedent — no documented "reduced" shape here the way the profile has a stub, plan.md's Phase 6 Decisions Log).
+
+### `GET /users/:username/streak/heatmap` — Optional auth (subject to privacy gating, same as above)
+GitHub-style calendar heatmap of daily watch activity, added in Phase 6. Zero-filled for the trailing 365 days (confirmed) — every day gets an entry, including zero-activity days, so the client renders the array directly into a grid with no gap-filling of its own. No query params/custom ranges for MVP.
+**Response `200`**
+```json
+{
+  "days": [
+    { "date": "2025-08-21", "count": 0 },
+    { "date": "2025-08-22", "count": 2 },
+    "... 365 entries total, ascending, ending today"
+  ]
+}
+```
+**Errors**: same as `GET /users/:username/streak`.
 
 ---
 

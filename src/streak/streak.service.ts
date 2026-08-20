@@ -9,6 +9,11 @@ export interface StreakSnapshot {
   lastStreakDate: Date | null;
 }
 
+export interface HeatmapDayDto {
+  date: string;
+  count: number;
+}
+
 type PrismaClientLike = PrismaService | Prisma.TransactionClient;
 
 @Injectable()
@@ -76,5 +81,44 @@ export class StreakService {
     });
 
     return { currentStreakCount, longestStreakCount, lastStreakDate };
+  }
+
+  /**
+   * GitHub-style calendar heatmap — zero-filled for every day in the
+   * trailing `days`-day range (confirmed, plan.md Phase 6), so the client
+   * renders the array directly into a grid with no gap-filling of its own.
+   * Uses the existing (userId, watchedAt desc) index — no new index needed.
+   */
+  async getHeatmap(userId: string, days = 365): Promise<HeatmapDayDto[]> {
+    const now = new Date();
+    const todayUtc = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    const startDate = new Date(todayUtc);
+    startDate.setUTCDate(startDate.getUTCDate() - (days - 1));
+
+    const rows = await this.prisma.watchLogEntry.findMany({
+      where: {
+        userId,
+        status: WatchStatus.WATCHED,
+        watchedAt: { gte: startDate },
+      },
+      select: { watchedAt: true },
+    });
+
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const key = row.watchedAt.toISOString().slice(0, 10);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+
+    const result: HeatmapDayDto[] = [];
+    for (let i = 0; i < days; i++) {
+      const day = new Date(startDate);
+      day.setUTCDate(day.getUTCDate() + i);
+      const key = day.toISOString().slice(0, 10);
+      result.push({ date: key, count: counts.get(key) ?? 0 });
+    }
+    return result;
   }
 }
